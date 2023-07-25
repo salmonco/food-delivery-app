@@ -6,14 +6,22 @@ import {
   Text,
   TextInput,
   View,
+  ActivityIndicator,
 } from 'react-native';
 import {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {RootStackParamList} from '../../AppInner';
+import EncryptedStorage from 'react-native-encrypted-storage';
 import DismissKeyboardView from '../components/DismissKeyboardView';
+import axios from 'axios';
+import Config from 'react-native-config';
+import {RootStackParamList} from '../../AppInner';
+import {useAppDispatch} from '../store';
+import userSlice from '../slices/user';
 
 type SignInScreenProps = NativeStackScreenProps<RootStackParamList, 'SignIn'>;
 
 function SignIn({navigation}: SignInScreenProps) {
+  const dispatch = useAppDispatch();
+  const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const emailRef = useRef<TextInput | null>(null);
@@ -27,15 +35,46 @@ function SignIn({navigation}: SignInScreenProps) {
     setPassword(text.trim());
   }, []);
 
-  const onSubmit = useCallback(() => {
+  const onSubmit = useCallback(async () => {
+    if (loading) {
+      return;
+    }
     if (!email || !email.trim()) {
       return Alert.alert('알림', '이메일을 입력해주세요.');
     }
     if (!password || !password.trim()) {
       return Alert.alert('알림', '비밀번호를 입력해주세요.');
     }
-    Alert.alert('알림', '로그인 되었습니다.');
-  }, [email, password]);
+    try {
+      setLoading(true);
+      const response = await axios.post(`${Config.API_URL}/login`, {
+        email,
+        password,
+      });
+      console.log(response.data);
+      Alert.alert('알림', '로그인 되었습니다.');
+      dispatch(
+        userSlice.actions.setUser({
+          name: response.data.data.name,
+          email: response.data.data.email,
+          accessToken: response.data.data.accessToken,
+        }),
+      );
+      // 앱 꺼도 데이터 유지 -> async-storage, encrypted-storage
+      // 보안에 민감한 데이터 -> redux(앱 끄면 날라감), encrypted-storage
+      // 개발 환경별로 달라지는 값 -> react-native-config(암호화 안 됨)
+      await EncryptedStorage.setItem(
+        'refreshToken',
+        response.data.data.refreshToken,
+      );
+    } catch (error) {
+      if (axios.isAxiosError<{message: string}>(error)) {
+        Alert.alert('알림', error.response?.data.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, dispatch, email, password]);
 
   const toSignUp = useCallback(() => {
     navigation.navigate('SignUp');
@@ -55,7 +94,6 @@ function SignIn({navigation}: SignInScreenProps) {
           importantForAutofill="yes"
           autoComplete="email"
           textContentType="emailAddress"
-          keyboardType="email-address"
           value={email}
           returnKeyType="next"
           clearButtonMode="while-editing"
@@ -89,9 +127,13 @@ function SignIn({navigation}: SignInScreenProps) {
               ? StyleSheet.compose(styles.loginButton, styles.loginButtonActive)
               : styles.loginButton
           }
-          disabled={!canGoNext}
+          disabled={!canGoNext || loading}
           onPress={onSubmit}>
-          <Text style={styles.loginButtonText}>로그인</Text>
+          {loading ? (
+            <ActivityIndicator color="white" />
+          ) : (
+            <Text style={styles.loginButtonText}>로그인</Text>
+          )}
         </Pressable>
         <Pressable onPress={toSignUp}>
           <Text>회원가입하기</Text>
