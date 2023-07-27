@@ -10,6 +10,13 @@ import {useSelector} from 'react-redux';
 import {RootState} from './src/store/reducer';
 import useSocket from './src/hooks/useSocket';
 import {useEffect} from 'react';
+import EncryptedStorage from 'react-native-encrypted-storage';
+import axios, {AxiosError} from 'axios';
+import {Alert} from 'react-native';
+import userSlice from './src/slices/user';
+import {useAppDispatch} from './src/store';
+import Config from 'react-native-config';
+import orderSlice from './src/slices/order';
 
 export type LoggedInParamList = {
   Orders: undefined;
@@ -27,27 +34,65 @@ const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function AppInner() {
-  // useSelector()는 <Provider> 내부에서만 사용 가능
+  const dispatch = useAppDispatch();
   const isLoggedIn = useSelector((state: RootState) => !!state.user.email);
   console.log('isLoggedIn', isLoggedIn);
 
   const [socket, disconnect] = useSocket();
 
+  // 앱 실행 시 토큰 있으면 로그인하는 코드
   useEffect(() => {
-    const helloCallback = (data: any) => {
+    const getTokenAndRefresh = async () => {
+      try {
+        const token = await EncryptedStorage.getItem('refreshToken');
+        if (!token) {
+          return;
+        }
+        const response = await axios.post(
+          `${Config.API_URL}/refreshToken`,
+          {},
+          {
+            headers: {
+              authorization: `Bearer ${token}`,
+            },
+          },
+        );
+        // redux state 업데이트하면 컴포넌트는 자동으로 리렌더링됨
+        dispatch(
+          userSlice.actions.setUser({
+            name: response.data.data.name,
+            email: response.data.data.email,
+            accessToken: response.data.data.accessToken,
+          }),
+        );
+      } catch (error) {
+        console.error(error);
+        if ((error as AxiosError).response?.data.code === 'expired') {
+          Alert.alert('알림', '다시 로그인 해주세요.');
+        }
+      } finally {
+        // TODO: 스플래시 스크린 없애기
+      }
+    };
+    getTokenAndRefresh();
+  }, [dispatch]);
+  // dispatch는 불변성이 보장된 함수라, deps에 넣으나 안 넣으나 처음 렌더링될 때 한 번 실행되는 건 같음
+
+  useEffect(() => {
+    const callback = (data: any) => {
       console.log(data);
+      dispatch(orderSlice.actions.addOrder(data));
     };
     if (socket && isLoggedIn) {
-      console.log(socket);
-      socket.emit('login', 'hello');
-      socket.on('hello', helloCallback);
+      socket.emit('acceptOrder', 'hello');
+      socket.on('order', callback);
     }
     return () => {
       if (socket) {
-        socket.off('hello', helloCallback);
+        socket.off('order', callback);
       }
     };
-  }, [isLoggedIn, socket]);
+  }, [dispatch, isLoggedIn, socket]);
 
   useEffect(() => {
     if (!isLoggedIn) {
@@ -55,6 +100,38 @@ function AppInner() {
       disconnect();
     }
   }, [isLoggedIn, disconnect]);
+
+  useEffect(() => {
+    axios.interceptors.response.use(
+      response => {
+        return response;
+      },
+      async error => {
+        const {
+          config,
+          response: {status},
+        } = error;
+        if (status === 419) {
+          if (error.response.data.code === 'expired') {
+            const originalRequest = config;
+            const refreshToken = await EncryptedStorage.getItem('refreshToken');
+            // token refresh 요청
+            const {data} = await axios.post(
+              `${Config.API_URL}/refreshToken`, // token refresh api
+              {},
+              {headers: {authorization: `Bearer ${refreshToken}`}},
+            );
+            // 새로운 토큰 저장
+            dispatch(userSlice.actions.setAccessToken(data.data.accessToken));
+            originalRequest.headers.authorization = `Bearer ${data.data.accessToken}`;
+            // 419로 요청 실패했던 요청 새로운 토큰으로 재요청
+            return axios(originalRequest);
+          }
+        }
+        return Promise.reject(error);
+      },
+    );
+  }, [dispatch]);
 
   return isLoggedIn ? (
     <Tab.Navigator>
